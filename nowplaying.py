@@ -4,20 +4,27 @@
 Shows the artwork of whatever a BluOS player is playing (including Spotify
 Connect, which BluOS reports like any other source). Touch: tap left = back,
 center = play/pause, right = next; swipe left = next, swipe right = back.
+With a Spotify login (--spotify-login), a heart in the bottom-right corner
+likes / unlikes the current Spotify track.
 
 Draws straight to the framebuffer, so no X / SDL is needed.
 Deps (Bullseye): sudo apt install python3-pil python3-numpy python3-evdev python3-requests
 """
 import argparse
+import base64
 import functools
 import glob
+import hashlib
 import io
+import json
+import math
 import os
+import secrets
 import signal
 import threading
 import time
 import xml.etree.ElementTree as ET
-from urllib.parse import urljoin
+from urllib.parse import parse_qs, urlencode, urljoin, urlparse
 
 import numpy as np
 import requests
@@ -31,6 +38,10 @@ FONT_CANDIDATES = {
 }
 PLAYING_STATES = ("play", "stream", "connecting")
 SWIPE_DISTANCE = 0.25  # fraction of the screen width
+SPOTIFY_GREEN = (30, 215, 96)
+SPOTIFY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "spotify.json")
+SPOTIFY_REDIRECT = "http://127.0.0.1:8888/callback"
+SPOTIFY_SCOPES = "user-read-currently-playing user-library-read user-library-modify"
 
 
 @functools.lru_cache(maxsize=None)
@@ -83,6 +94,83 @@ class Player:
         except (requests.RequestException, OSError) as e:
             print("artwork failed:", url, e)
             return None
+
+
+# --- Spotify (likes only; playback stays with BluOS) -------------------------
+
+class Spotify:
+    API = "https://api.spotify.com/v1"
+    TOKEN_URL = "https://accounts.spotify.com/api/token"
+
+    def __init__(self, path=SPOTIFY_FILE):
+        self.path = path
+        self.cfg = json.load(open(path))
+        self.token, self.expires = None, 0.0
+        self.lock = threading.Lock()
+
+    def _headers(self):
+        with self.lock:
+            if time.time() > self.expires - 60:
+                r = requests.post(self.TOKEN_URL, timeout=10, data={
+                    "grant_type": "refresh_token",
+                    "refresh_token": self.cfg["refresh_token"],
+                    "client_id": self.cfg["client_id"],
+                })
+                r.raise_for_status()
+                t = r.json()
+                self.token, self.expires = t["access_token"], time.time() + t["expires_in"]
+                if t.get("refresh_token", self.cfg["refresh_token"]) != self.cfg["refresh_token"]:
+                    self.cfg["refresh_token"] = t["refresh_token"]  # Spotify rotates these
+                    save_private_json(self.path, self.cfg)
+            return {"Authorization": "Bearer " + self.token}
+
+    def _call(self, method, path, **params):
+        r = requests.request(method, self.API + path, params=params, headers=self._headers(), timeout=10)
+        r.raise_for_status()
+        return r
+
+    def current_track(self):
+        """(uri, name) of what Spotify thinks is playing, or None."""
+        r = self._call("GET", "/me/player/currently-playing")
+        item = r.json().get("item") if r.status_code == 200 else None
+        return (item["uri"], item["name"]) if item else None
+
+    def is_saved(self, uri):
+        return self._call("GET", "/me/library/contains", uris=uri).json()[0]
+
+    def set_saved(self, uri, saved):
+        self._call("PUT" if saved else "DELETE", "/me/library", uris=uri)
+
+
+def save_private_json(path, data):
+    with open(path, "w") as f:
+        json.dump(data, f)
+    os.chmod(path, 0o600)
+
+
+def spotify_login(client_id):
+    """One-time PKCE login; stores a refresh token next to the script."""
+    verifier = secrets.token_urlsafe(64)
+    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+    state = secrets.token_urlsafe(16)
+    print("1. Open this link in any browser and approve:\n")
+    print("https://accounts.spotify.com/authorize?" + urlencode({
+        "client_id": client_id, "response_type": "code", "redirect_uri": SPOTIFY_REDIRECT,
+        "scope": SPOTIFY_SCOPES, "state": state,
+        "code_challenge_method": "S256", "code_challenge": challenge,
+    }))
+    print("\n2. The browser then fails to load a 127.0.0.1 page. That's expected:")
+    url = input("   paste that page's full address here: ").strip()
+    query = parse_qs(urlparse(url).query)
+    if query.get("state", [""])[0] != state or "code" not in query:
+        raise SystemExit("That address doesn't contain a login code: %s" % query.get("error", url))
+    r = requests.post(Spotify.TOKEN_URL, timeout=10, data={
+        "grant_type": "authorization_code", "code": query["code"][0], "redirect_uri": SPOTIFY_REDIRECT,
+        "client_id": client_id, "code_verifier": verifier,
+    })
+    r.raise_for_status()
+    save_private_json(SPOTIFY_FILE, {"client_id": client_id, "refresh_token": r.json()["refresh_token"]})
+    print("Logged in. Saved to %s. Restart the service to show the heart." % SPOTIFY_FILE)
 
 
 # --- Display ----------------------------------------------------------------
@@ -185,7 +273,21 @@ def wrap(draw, text, font, width, max_lines):
     return lines
 
 
-def render(size, status, art, message=None):
+def draw_heart(draw, cx, cy, size, filled, color):
+    pts = []
+    for i in range(48):
+        t = 2 * math.pi * i / 48
+        x = 16 * math.sin(t) ** 3
+        y = 13 * math.cos(t) - 5 * math.cos(2 * t) - 2 * math.cos(3 * t) - math.cos(4 * t)
+        pts.append((cx + x * size / 34, cy - y * size / 34))
+    if filled:
+        draw.polygon(pts, fill=color)
+    else:
+        draw.line(pts + pts[:1], fill=color, width=3, joint="curve")
+
+
+def render(size, status, art, message=None, liked=None):
+    """liked: True / False draws the like button, None hides it."""
     W, H = size
     img = Image.new("RGB", size, "black")
     draw = ImageDraw.Draw(img)
@@ -217,15 +319,17 @@ def render(size, status, art, message=None):
             y += 8
 
     if status.get("state") not in PLAYING_STATES:
-        # Pause badge in the bottom-right corner.
-        x, y = W - 40, H - 44
+        # Pause badge in the bottom-left corner of the text panel.
+        x, y = panel_x, H - 44
         draw.rectangle((x, y, x + 8, y + 28), fill=(255, 255, 255))
         draw.rectangle((x + 16, y, x + 24, y + 28), fill=(255, 255, 255))
+    if liked is not None:
+        draw_heart(draw, W - 34, H - 32, 34, liked, SPOTIFY_GREEN if liked else (255, 255, 255))
     return img
 
 
 def feedback(frame, icon):
-    """Draws a back / next / play / pause icon over the frame."""
+    """Draws a back / next / play / pause / like / unlike icon over the frame."""
     # Only the square around the icon is blended; the whole frame is too slow on a Pi.
     W, H = frame.size
     r = 48
@@ -240,6 +344,8 @@ def feedback(frame, icon):
         draw.rectangle((cx + 5, cy - 20, cx + 16, cy + 20), fill=white)
     elif icon == "play":
         draw.polygon([(cx - 13, cy - 22), (cx - 13, cy + 22), (cx + 22, cy)], fill=white)
+    elif icon in ("like", "unlike"):
+        draw_heart(draw, cx, cy + 2, 46, icon == "like", SPOTIFY_GREEN + (255,) if icon == "like" else white)
     else:
         d = 1 if icon == "next" else -1
         for ox in (-18, 2):
@@ -264,7 +370,7 @@ def find_touch_device():
 
 
 def touch_loop(on_gesture):
-    """Calls on_gesture(start, end) per touch, with (x, y) positions normalized to 0..1."""
+    """Calls on_gesture(start, end) per touch, with raw (x, y) positions normalized to 0..1."""
     from evdev import ecodes
     dev = find_touch_device()
     print("touchscreen:", dev.path, dev.name)
@@ -289,15 +395,21 @@ def touch_loop(on_gesture):
             start = pos()  # first complete report of this touch
 
 
-def gesture(start, end, axis, invert):
-    i = 0 if axis == "x" else 1
-    h0, h1 = start[i], end[i]
-    if invert:
-        h0, h1 = 1 - h0, 1 - h1
+def to_screen(p, args):
+    """Raw normalized touch position -> (left..right, top..bottom), both 0..1."""
+    h, v = (p[0], p[1]) if args.touch_axis == "x" else (p[1], p[0])
+    return (1 - h if args.touch_invert else h), (1 - v if args.touch_invert_v else v)
+
+
+def gesture(start, end, like_button=False):
+    """start / end in screen coordinates (see to_screen)."""
+    (h0, v0), (h1, _) = start, end
     if h1 - h0 < -SWIPE_DISTANCE:
         return "next"  # swipe left
     if h1 - h0 > SWIPE_DISTANCE:
         return "back"  # swipe right
+    if like_button and h0 > 0.8 and v0 > 0.7:
+        return "like"
     return "back" if h0 < 1 / 3 else "next" if h0 > 2 / 3 else "toggle"
 
 
@@ -309,19 +421,27 @@ def main():
     p.add_argument("--fb", help="framebuffer device (default: autodetect the PiTFT)")
     p.add_argument("--touch-axis", choices=("x", "y"), default="x",
                    help="raw touch axis that runs left-to-right on screen")
-    p.add_argument("--touch-invert", action="store_true", help="flip the left/right zones")
+    p.add_argument("--touch-invert", action="store_true", help="flip left/right")
+    p.add_argument("--touch-invert-v", action="store_true", help="flip top/bottom")
     p.add_argument("--idle-off", type=int, default=600,
                    help="seconds paused/stopped before the backlight turns off (0 = never)")
-    p.add_argument("--calibrate", action="store_true", help="print touch coordinates and gestures, then exit with Ctrl-C")
+    p.add_argument("--calibrate", action="store_true", help="print touch positions and gestures, then exit with Ctrl-C")
+    p.add_argument("--spotify-login", metavar="CLIENT_ID", help="log in to Spotify once, for the like button")
     p.add_argument("--png", help="render the current status to this PNG once and exit (for testing)")
     args = p.parse_args()
 
+    if args.spotify_login:
+        spotify_login(args.spotify_login)
+        return
+
     player = Player(args.host)
+    spotify = Spotify() if os.path.exists(SPOTIFY_FILE) else None
 
     if args.calibrate:
         def show_gesture(start, end):
-            print("x=%.2f y=%.2f -> x=%.2f y=%.2f: %s"
-                  % (start + end + (gesture(start, end, args.touch_axis, args.touch_invert),)))
+            s, e = to_screen(start, args), to_screen(end, args)
+            print("left-right %.2f top-bottom %.2f -> %.2f %.2f: %s"
+                  % (s + e + (gesture(s, e, like_button=True),)))
         touch_loop(show_gesture)
         return
 
@@ -329,7 +449,7 @@ def main():
         _, status = player.status()
         art = player.fetch_art(status["image"]) if status.get("image") else None
         art = prepare_art(art, (480, 320)) if art else None
-        render((480, 320), status, art).save(args.png)
+        render((480, 320), status, art, liked=False if spotify else None).save(args.png)
         return
 
     fb = Framebuffer(args.fb)
@@ -342,6 +462,42 @@ def main():
         raise SystemExit(0)
     signal.signal(signal.SIGTERM, on_stop)
     signal.signal(signal.SIGINT, on_stop)
+
+    view = {"status": None, "art": None}
+    like = {"track": None, "uri": None, "liked": None}  # liked None = no button
+
+    def current_frame():
+        return render(fb.size, view["status"], view["art"], liked=like["liked"])
+
+    def lookup_like(track):
+        # Spotify can lag behind BluOS by a moment, so retry until the titles match.
+        # BluOS cuts long titles short, hence startswith.
+        for _ in range(5):
+            try:
+                current = spotify.current_track()
+                if current and track[0] and current[1].startswith(track[0].strip()):
+                    liked = spotify.is_saved(current[0])
+                    if like["track"] == track:
+                        like.update(uri=current[0], liked=liked)
+                        fb.show(current_frame())
+                    return
+            except (requests.RequestException, ValueError, KeyError) as e:
+                print("spotify:", e)
+                return
+            time.sleep(1.5)
+        print("spotify: couldn't match", track[0])
+
+    def toggle_like():
+        uri, liked = like["uri"], like["liked"]
+        like["liked"] = not liked
+        fb.flash("like" if not liked else "unlike", current_frame())
+        try:
+            spotify.set_saved(uri, not liked)
+        except requests.RequestException as e:
+            print("spotify:", e)
+            like["liked"] = liked
+            fb.show(current_frame())
+
     last_touch = [0.0]
     touch_icon = [None]
     playing = [False]
@@ -354,8 +510,12 @@ def main():
         if not backlight.on:  # first touch on a dark screen only wakes it
             backlight.set(True)
             return
-        action = gesture(start, end, args.touch_axis, args.touch_invert)
-        print("touch %.2f,%.2f -> %.2f,%.2f: %s" % (start + end + (action,)))
+        s, e = to_screen(start, args), to_screen(end, args)
+        action = gesture(s, e, like_button=like["liked"] is not None)
+        print("touch %.2f,%.2f -> %.2f,%.2f: %s" % (s + e + (action,)))
+        if action == "like":
+            toggle_like()
+            return
         touch_icon[0] = action if action != "toggle" else "pause" if playing[0] else "play"
         fb.flash(touch_icon[0])
         getattr(player, action)()
@@ -365,7 +525,7 @@ def main():
     except Exception as e:
         print("touch disabled:", e)
 
-    etag, art_url, art = None, None, None
+    etag, art_url = None, None
     track, prev_track = None, None
     last_playing = time.monotonic()
     while True:
@@ -394,15 +554,20 @@ def main():
         track = now_track
         playing[0] = now_playing
 
+        if now_track != like["track"]:
+            like.update(track=now_track, uri=None, liked=None)
+            if spotify and status.get("service") == "Spotify":
+                threading.Thread(target=lookup_like, args=(now_track,), daemon=True).start()
+
+        view["status"] = status
         if status.get("image") != art_url:
             art_url = status.get("image")
-            frame = render(fb.size, status, None)  # new titles now, cover once it's downloaded
-            fb.flash(icon, frame) if icon else fb.show(frame)
+            view["art"] = None  # new titles now, cover once it's downloaded
+            fb.flash(icon, current_frame()) if icon else fb.show(current_frame())
             icon = None
             art = player.fetch_art(art_url) if art_url else None
-            art = prepare_art(art, fb.size) if art else None
-        frame = render(fb.size, status, art)
-        fb.flash(icon, frame) if icon else fb.show(frame)
+            view["art"] = prepare_art(art, fb.size) if art else None
+        fb.flash(icon, current_frame()) if icon else fb.show(current_frame())
 
         if playing[0]:
             last_playing = time.monotonic()

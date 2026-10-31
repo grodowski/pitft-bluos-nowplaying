@@ -37,6 +37,15 @@ sudo systemctl enable --now nowplaying
 
 Logs: `journalctl -u nowplaying -f`
 
+## Spotify like button (optional)
+
+Shows a heart in the bottom-right corner while Spotify plays; tap it to like / unlike. Needs Spotify Premium.
+
+1. At [developer.spotify.com/dashboard](https://developer.spotify.com/dashboard), create an app: redirect URI `http://127.0.0.1:8888/callback`, API "Web API". Copy its Client ID.
+2. On the Pi: `sudo python3 ~/pitft-nowplaying/nowplaying.py --spotify-login <CLIENT_ID>` and follow the prompts. This saves `spotify.json` next to the script.
+3. Run `--calibrate` and tap the bottom-right corner: it should say `like`. If it doesn't, add `--touch-invert-v`.
+4. `sudo systemctl restart nowplaying`
+
 ## Restore the console
 
 ```bash
@@ -57,6 +66,8 @@ Autologin comes back too, if it was on.
 | `--fb` | autodetect | Framebuffer, e.g. `/dev/fb1` |
 | `--touch-axis` | `x` | Touch axis that runs left to right |
 | `--touch-invert` | off | Swap left/right zones |
+| `--touch-invert-v` | off | Swap top/bottom (for the like button) |
+| `--spotify-login ID` | | One-time Spotify login for the like button |
 | `--idle-off` | `600` | Seconds before backlight off (`0` = never) |
 | `--calibrate` | | Print tap zones |
 | `--png FILE` | | Render a screenshot and exit |
