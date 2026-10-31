@@ -1,0 +1,13 @@
+[Unit]
+Description=PiTFT now-playing kiosk (BluOS / Spotify Connect)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# Runs as root for framebuffer, touchscreen and backlight access.
+ExecStart=/usr/bin/python3 -u /home/pi/pitft-nowplaying/nowplaying.py --host NODE2iWohnzimmer.local --touch-axis y --touch-invert
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
