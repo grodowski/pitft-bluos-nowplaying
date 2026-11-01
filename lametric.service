@@ -1,0 +1,14 @@
+[Unit]
+Description=BluOS now-playing on a LaMetric TIME
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# Needs only the network, so it runs unprivileged (unlike the PiTFT kiosk).
+User=pi
+ExecStart=/usr/bin/python3 -u /home/pi/pitft-nowplaying/lametric.py --host NODE2iWohnzimmer.local --clock LAMETRIC_IP --key API_KEY
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

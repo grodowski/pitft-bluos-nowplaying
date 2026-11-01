@@ -61,10 +61,10 @@ class Player:
         self.base = "http://%s" % (host if ":" in host else host + ":11000")
         self.actions = {}
 
-    def status(self, etag=None):
-        """Long-polls /Status: returns as soon as something changes (or after 100 s)."""
-        params = {"timeout": 100, "etag": etag} if etag else {}
-        r = requests.get(self.base + "/Status", params=params, timeout=110)
+    def status(self, etag=None, wait=100):
+        """Long-polls /Status: returns as soon as something changes (or after `wait` s)."""
+        params = {"timeout": wait, "etag": etag} if etag else {}
+        r = requests.get(self.base + "/Status", params=params, timeout=wait + 10)
         r.raise_for_status()
         root = ET.fromstring(r.content)
         # Spotify etc. expose their own back/skip URLs; plain /Back and /Skip are the fallback.

@@ -4,6 +4,12 @@ Shows BluOS / Spotify Connect cover art on a PiTFT 3.5". Tap left = previous, ce
 
 Runs on Raspberry Pi OS Bullseye, no desktop needed.
 
+## Preview
+
+![PiTFT preview](docs/pitft-preview.png)
+
+Made-up covers, drawn by the real render code: a Spotify track that's in your liked songs (left), and a paused track (right). The cover fills the left square; the blurred backdrop and track details fill the rest. Regenerate this and the LaMetric preview with `python3 preview.py`.
+
 ## Setup
 
 PiTFT driver (the current Adafruit script is Bookworm-only, so use an older version):
@@ -45,6 +51,26 @@ Shows a heart in the bottom-right corner while Spotify plays; tap it to like / u
 2. On the Pi: `sudo python3 ~/pitft-nowplaying/nowplaying.py --spotify-login <CLIENT_ID>` and follow the prompts. This saves `spotify.json` next to the script.
 3. Run `--calibrate` and tap the bottom-right corner: it should say `like`. If it doesn't, add `--touch-invert-v`.
 4. `sudo systemctl restart nowplaying`
+
+## LaMetric TIME (optional)
+
+`lametric.py` mirrors the player on a LaMetric TIME (37×8): the cover as 8×8 pixels on the left, a progress bar along the bottom of the right side. It streams raw pixels (LaMetric's Streaming API, tested on firmware 3.2.8), so nothing needs installing on the clock. After 30 s paused it hands the display back to the clock's own apps.
+
+1. In the LaMetric phone app, copy the clock's API key from its device settings.
+2. Put the clock's IP and key in `lametric.service`, then:
+
+```bash
+sudo cp ~/pitft-nowplaying/lametric.service /etc/systemd/system/
+sudo systemctl enable --now lametric
+```
+
+It also accepts button webhooks on port 5000 (GET or POST, unauthenticated, so LAN only): `/btn/next`, `/btn/prev`, `/btn/toggle`. Logs: `journalctl -u lametric -f`
+
+### Preview
+
+![LaMetric preview](docs/lametric-preview.png)
+
+A mockup with made-up covers, not a photo of the clock. Left: the cover averaged down to 8×8. Right: the same cover in greyscale, stretched dim across the top six rows; a play/pause icon in the corner; and the progress bar, with the played part dimmer, the current position two pixels tall and full brightness, and the rest a faint line. Tune it with `--wash`, `--played`, `--head`, `--track` and `--icon` (brightness 0–1, 0 turns that part off).
 
 ## Restore the console
 
