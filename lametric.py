@@ -20,9 +20,10 @@ import time
 import xml.etree.ElementTree as ET
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+import numpy as np
 import requests
 import urllib3
-from PIL import Image, ImageOps
+from PIL import Image, ImageEnhance, ImageOps
 
 from nowplaying import PLAYING_STATES, Player
 
@@ -105,6 +106,25 @@ def clear(frame, x0, y0, x1, y1):
     for x in range(max(0, x0), min(w, x1 + 1)):
         for y in range(max(0, y0), min(h, y1 + 1)):
             frame.putpixel((x, y), (0, 0, 0))
+
+
+def make_art(cover, side, saturation=1.5, max_gain=2.0):
+    """Shrinks the cover to side x side LEDs so it still pops.
+
+    Averages in linear light (plain averaging of gamma-encoded pixels comes out too dark),
+    boosts saturation (mixing a block of colours drifts to grey), then stretches the
+    levels so the brightest LED is near full, by at most max_gain so dark covers stay dark.
+    """
+    n = 8  # source pixels per LED, per axis
+    src = np.asarray(cover.convert("RGB").resize((side * n, side * n), Image.BOX), dtype=np.float32) / 255
+    linear = src ** 2.2
+    avg = linear.reshape(side, n, side, n, 3).mean(axis=(1, 3)) ** (1 / 2.2)
+    art = Image.fromarray(np.uint8(np.clip(avg * 255 + 0.5, 0, 255)))
+    art = ImageEnhance.Color(art).enhance(saturation)
+    a = np.asarray(art, dtype=np.float32)
+    peak = np.percentile(a.max(axis=2), 95)
+    gain = min(max_gain, 255 / peak) if peak > 0 else 1.0
+    return Image.fromarray(np.uint8(np.clip(a * gain, 0, 255)))
 
 
 def make_wash(cover, size):
@@ -198,7 +218,7 @@ class Playback:
         return min(pos, total) if total else pos
 
 
-def poll_bluos(player, playback, size):
+def poll_bluos(player, playback, size, saturation):
     """Background thread: long-polls BluOS, which answers at once on any change."""
     etag, art_url = None, None
     while True:
@@ -214,8 +234,7 @@ def poll_bluos(player, playback, size):
             print("%s: %s - %s" % (status.get("state"), status.get("title2"), status.get("title1")))
             cover = player.fetch_art(art_url) if art_url else None
             h = size[1]
-            # BOX averages each block; NEAREST would keep one arbitrary pixel per ~75x75 block.
-            art = cover.resize((h, h), Image.BOX) if cover else None
+            art = make_art(cover, h, saturation) if cover else None
             wash = make_wash(cover, size) if cover else None
             playback.update(status, True, art, wash)
         else:
@@ -260,6 +279,8 @@ def main():
     p.add_argument("--track", type=float, default=Look.track, help="brightness of the unplayed part (0-1, 0 = off)")
     p.add_argument("--icon", type=float, default=Look.icon,
                    help="brightness of the play/pause/stop icon (0-1, 0 = off)")
+    p.add_argument("--saturation", type=float, default=1.5,
+                   help="colour boost for the 8x8 cover (1 = as is)")
     p.add_argument("--wash", type=float, default=Look.wash,
                    help="max brightness of the greyscale cover behind the right block (0-1, 0 = off)")
     p.add_argument("--ramp", action="store_true", help="show a brightness test card for 20 s and exit")
@@ -287,7 +308,7 @@ def main():
         serve_buttons(args.port, player)
 
     playback = Playback()
-    threading.Thread(target=poll_bluos, args=(player, playback, clock.size), daemon=True).start()
+    threading.Thread(target=poll_bluos, args=(player, playback, clock.size, args.saturation), daemon=True).start()
 
     last_playing = time.monotonic()
     was_playing, play_since = True, 0.0

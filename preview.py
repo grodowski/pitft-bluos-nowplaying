@@ -71,7 +71,7 @@ def lametric_preview(path):
     out = Image.new("RGB", (LW + size[0] * S + 20, (size[1] * S + 14) * len(rows) + 10), (8, 8, 8))
     d = ImageDraw.Draw(out)
     for i, (label, cover, icon) in enumerate(rows):
-        art = cover.resize((size[1], size[1]), Image.BOX)
+        art = lametric.make_art(cover, size[1])
         frame = lametric.render(size, art, 0.4, lametric.Look, lametric.make_wash(cover, size), icon)
         oy = 10 + i * (size[1] * S + 14)
         d.text((10, oy + size[1] * S // 2 - 6), label, fill=LABEL)
