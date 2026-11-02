@@ -70,7 +70,7 @@ It also accepts button webhooks on port 5000 (GET or POST, unauthenticated, so L
 
 ![LaMetric preview](docs/lametric-preview.png)
 
-A mockup with made-up covers, not a photo of the clock. Left: the cover averaged down to 8×8. Right: the same cover in greyscale, stretched dim across the top six rows; a play/pause icon in the corner; and the progress bar, with the played part dimmer, the current position two pixels tall and full brightness, and the rest a faint line. Tune it with `--wash`, `--played`, `--head`, `--track` and `--icon` (brightness 0–1, 0 turns that part off).
+A mockup with made-up covers, not a photo of the clock. Left: the cover averaged down to 8×8. Right: the same cover in greyscale, stretched dim across the whole block, which doubles as a full-height progress bar: played columns are lifted lighter, a 1 px white column marks the current position. A play/pause icon sits in the corner. Tune it with `--wash`, `--past`, `--head`, `--icon` (0–1, 0 turns that part off) and `--saturation`.
 
 ## Restore the console
 

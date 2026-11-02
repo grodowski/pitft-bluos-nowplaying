@@ -2,7 +2,8 @@
 """BluOS now-playing on a LaMetric TIME, drawn as raw pixels over the Streaming API (LMSP).
 
 Left 8x8: the cover, area-averaged down to 8x8. Right 29x8: a dim greyscale wash of the
-cover stretched to fit, a play/pause/stop icon, and a progress bar on the bottom row.
+cover stretched to fit, doubling as a full-height progress bar (played columns lighter,
+a 1 px playhead), and a play/pause/stop icon.
 Redraws the moment BluOS reports a change; the bar advances locally between reports.
 After --idle seconds paused/stopped it ends the stream, so the clock goes back to its
 normal apps; it takes over again when playback resumes.
@@ -128,14 +129,18 @@ def make_art(cover, side, saturation=1.5, max_gain=2.0):
 
 
 def make_wash(cover, size):
-    """The cover in greyscale, stretched over the right block above the bar (rows 0-5)."""
+    """The cover in greyscale, stretched over the whole right block."""
     w, h = size
-    return ImageOps.autocontrast(cover.convert("L")).resize((w - h, h - 2), Image.BOX)
+    return ImageOps.autocontrast(cover.convert("L")).resize((w - h, h), Image.BOX)
 
 
 class Look:
-    """Brightness (0-1) of each element; argparse overrides these."""
-    played, head, track, icon, wash = 0.35, 1.0, 0.08, 0.5, 0.3
+    """Brightness (0-1) of each element; argparse overrides these.
+
+    wash: max brightness of the greyscale cover. past: how far played columns are lifted
+    towards white (0 = unchanged, 1 = solid white). head: the 1 px playhead column.
+    """
+    head, past, icon, wash = 1.0, 0.3, 0.5, 0.3
 
 
 def render(size, art, progress, look=Look, wash=None, icon=None):
@@ -143,17 +148,22 @@ def render(size, art, progress, look=Look, wash=None, icon=None):
     frame = Image.new("RGB", size)  # black
     if art is not None:
         frame.paste(art, (0, 0))
-    if wash is not None and look.wash > 0:
-        for x in range(wash.width):
-            for y in range(wash.height):
-                frame.putpixel((h + x, y), white(wash.getpixel((x, y)) / 255 * look.wash))
+    # The right block is the progress bar, full height: the cover wash as the background,
+    # played columns lifted towards white, and a 1 px column at the current position.
+    pos = None
     if progress is not None:
         n = w - h
-        pos = h + min(n - 1, int(n * max(0.0, min(1.0, progress))))  # the pixel being played now
-        for x in range(h, w):
-            frame.putpixel((x, h - 1), white(look.head if x == pos else look.played if x < pos else look.track))
-        frame.putpixel((pos, h - 2), white(look.head))
-    # The icon sits on rows 0-4, so row 5 stays clear above the 2 px playhead.
+        pos = h + min(n - 1, int(n * max(0.0, min(1.0, progress))))
+    for x in range(h, w):
+        for y in range(h):
+            v = wash.getpixel((x - h, y)) / 255 * look.wash if wash is not None else 0.0
+            if pos is not None:
+                if x == pos:
+                    v = look.head
+                elif x < pos:
+                    v += (1 - v) * look.past
+            if v > 0:
+                frame.putpixel((x, y), white(v))
     if icon and look.icon > 0:
         glyph = ICONS[icon]
         x = w - 1 - len(glyph[0])  # one column in from the right edge
@@ -274,9 +284,9 @@ def main():
     p.add_argument("--idle", type=int, default=30,
                    help="seconds paused/stopped before handing the display back to the clock")
     p.add_argument("--port", type=int, default=5000, help="button webhook port (0 = off)")
-    p.add_argument("--played", type=float, default=Look.played, help="brightness of the played part of the bar (0-1)")
-    p.add_argument("--head", type=float, default=Look.head, help="brightness of the playhead (0-1)")
-    p.add_argument("--track", type=float, default=Look.track, help="brightness of the unplayed part (0-1, 0 = off)")
+    p.add_argument("--head", type=float, default=Look.head, help="brightness of the 1 px playhead column (0-1)")
+    p.add_argument("--past", type=float, default=Look.past,
+                   help="how far played columns are lifted towards white (0-1, 0 = no change)")
     p.add_argument("--icon", type=float, default=Look.icon,
                    help="brightness of the play/pause/stop icon (0-1, 0 = off)")
     p.add_argument("--saturation", type=float, default=1.5,
